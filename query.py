@@ -1,7 +1,9 @@
 #!/usr/bin/env python
-
+#
 # Slightly hacky script to clean up crypto team project board
+# Looks for "Done" and "Tombstoned" issues which have not been updated in the last 6 months, and archives them.
 
+from datetime import datetime, timedelta
 from typing import List
 
 import attrs
@@ -29,14 +31,14 @@ client = Client(
 class Item:
     id: str
     url: str
-    closedAt: str
+    updatedAt: datetime
 
 
 def get_issues():
     pagination_token = ""
     while pagination_token is not None:
         query = gql(
-            """
+        """
         query( $pag: String ) {
           organization(login: "element-hq") {
             projectV2(number: 76) {
@@ -48,18 +50,35 @@ def get_issues():
                   type
                   id
                   databaseId
+                  updatedAt
+
+                  status: fieldValueByName(name: "Status") {
+                    ... on ProjectV2ItemFieldSingleSelectValue {
+                      name
+                    }
+                  }
 
                   content {
                     ... on Issue {
                       closed
                       closedAt
                       url
-                      labels(first:100) {
-                        nodes {
-                          id
-                          name
-                        }
-                      }
+                      """
+#                      labels(first:100) {
+#                        nodes {
+#                          id
+#                          name
+#                        }
+#                      }
+                      """
+                    }
+                    ... on PullRequest {
+                      closed
+                      closedAt
+                      url
+                    }
+                    ... on DraftIssue {
+                      title
                     }
                   }
                 }
@@ -76,7 +95,7 @@ def get_issues():
 
 
 def archive_item(item: Item) -> None:
-    print(f"Archiving {item.url} from {item.closedAt}")
+    print(f"Archiving {item.url}")
     query = gql(
         """
       mutation( $itemid: ID!, $projectid: ID! ) {
@@ -96,17 +115,36 @@ items: List[Item] = []
 
 for item in get_issues():
     try:
-        if item["type"] != "ISSUE":
+        if item["type"] == "DRAFT_ISSUE":
+            title = item["content"]["title"]
+        else:
+            title = item["content"]["url"]
+
+        # ignore items which are not 'Done' or 'Tombstoned'
+        status = item["status"]["name"]
+        if status not in ('Done', 'Tombstoned'):
             continue
-        if not item["content"]["closed"]:
+
+        #print(f'Considering {status} {item["type"]} {title}: {item}')
+
+        # python pre-3.11 doesn't support trailing TZ identifier
+        updatedAt = datetime.fromisoformat(item["updatedAt"].removesuffix('Z'))
+
+        # ignore items updated too recently
+        if datetime.now()-updatedAt < timedelta(days=180):
+            #print("updated too recently");
             continue
-        labels = [lbl["name"] for lbl in item["content"]["labels"]["nodes"]]
-        if "Z-UISI" not in labels:
-            continue
+
+        #labels = [lbl["name"] for lbl in item["content"]["labels"]["nodes"]]
+        #if "Z-UISI" not in labels:
+        #    continue
+
+        print(f"Will archive {status} {item['type']} {title}: last updated {updatedAt}")
+
         items.append(Item(
             item["id"],
-            item["content"]["url"],
-            item["content"]["closedAt"],
+            title,
+            updatedAt,
         ))
     except Exception:
         raise Exception(f"error parsing item {item}")
